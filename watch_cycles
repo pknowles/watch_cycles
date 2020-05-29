@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+import os, sys
+import curses
+import atexit
+import threading
+
+class WatchCycles:
+	def __init__(self, input_stream, marker):
+		self.input_stream = input_stream
+		self.marker = marker
+
+		self.old_display_index = -1
+		self.current_pad_lines = 0
+
+		self.height = lambda: curses.LINES - 1
+		self.width = lambda: curses.COLS - 1
+
+		self.display_index = 0
+		self.scroll = 0
+		self.history = []
+		self.page = []
+
+		self.inscreen = False
+
+	def current_page(self):
+		if self.display_index == 0:
+		 	return self.page
+		elif self.display_index - 1 < len(self.history):
+			return self.history[-self.display_index]
+		return ["No content"]
+
+	def run(self):
+		self.running = True
+		self.lock = threading.Lock()
+		if self.inscreen:
+			self.thread_keyboard = threading.Thread(name ='keyboard', target=self.keyboard_loop)
+			self.thread_keyboard.start()
+		self.thread_stdin = threading.Thread(name ='stdin', target=self.stdin_loop)
+		self.thread_stdin.start()
+		if self.inscreen:
+			self.thread_keyboard.join()
+		self.thread_stdin.join()
+
+	def __enter__(self):
+		self.stdscr = curses.initscr()
+		curses.noecho()
+		curses.cbreak()
+		self.stdscr.keypad(True)
+		self.output_pad = curses.newpad(1000, 1000)
+		self.inscreen = True
+		return self
+
+	def __exit__(self, exc_type, exc_value, traceback):
+		curses.nocbreak()
+		self.stdscr.keypad(False)
+		curses.echo()
+		curses.endwin()
+		self.inscreen = False
+
+	def update(self):
+		if self.old_display_index != self.display_index:
+			self.old_display_index = self.display_index
+			if self.inscreen:
+				self.output_pad.clear()
+			else:
+				print("Clearing")
+			self.current_pad_lines = 0
+		for line in self.current_page()[self.current_pad_lines:]:
+			if self.inscreen:
+				self.output_pad.addstr(self.current_pad_lines, 0, line)
+			else:
+				print("Adding: " + line)
+			self.current_pad_lines += 1
+		if self.inscreen:
+			self.stdscr.move(0, 0)
+			num_pages = len(self.history)
+			self.stdscr.addstr("page %i/%i" % (num_pages - self.display_index, num_pages))
+			self.output_pad.refresh(self.scroll, 0, 1, 0, self.height(), self.width())
+			self.stdscr.refresh()
+
+	def keyboard_loop(self):
+		while self.running:
+			char = self.stdscr.getch()
+			with self.lock:
+				if char == 113 or char == -1: self.running = False
+				elif char == curses.KEY_RIGHT: self.display_index = max(self.display_index - 1, 0)
+				elif char == curses.KEY_LEFT: self.display_index += 1
+				elif char == curses.KEY_UP: self.scroll = max(self.scroll - 1, 0)
+				elif char == curses.KEY_DOWN: self.scroll += 1
+				self.update()
+
+		# unblock the other thread
+		self.input_stream.close()
+
+	def stdin_loop(self):
+		for line in self.input_stream:
+			if self.marker in line:
+				self.history += [self.page]
+				self.page = []
+				if self.display_index > 0:
+					self.display_index += 1
+				else:
+					self.old_display_index += 1
+			self.page += [line]
+			if self.display_index == 0:
+				with self.lock:
+					self.update()
+		#self.running = False
+
+mystdin_fd = os.dup(0)
+termin = open("/dev/tty")
+os.dup2(termin.fileno(), 0)
+mystdin = open(mystdin_fd, 'r')
+w = WatchCycles(mystdin, sys.argv[1])
+with w:
+	w.run()
