@@ -3,6 +3,7 @@ import os, sys
 import curses
 import atexit
 import threading
+import difflib
 
 class WatchCycles:
 	def __init__(self, input_stream, marker):
@@ -20,13 +21,18 @@ class WatchCycles:
 		self.history = []
 		self.page = []
 
+		self.color_normal = 1
+		self.color_different = 2
+		self.color_linedifferent = 3
+
 		self.inscreen = False
 
-	def current_page(self):
-		if self.display_index == 0:
+	def current_page(self, offset=0):
+		index = self.display_index + offset
+		if index == 0:
 		 	return self.page
-		elif self.display_index - 1 < len(self.history):
-			return self.history[-self.display_index]
+		elif index - 1 < len(self.history):
+			return self.history[-index]
 		return ["No content"]
 
 	def run(self):
@@ -45,34 +51,82 @@ class WatchCycles:
 		self.stdscr = curses.initscr()
 		curses.noecho()
 		curses.cbreak()
-		self.stdscr.keypad(True)
-		self.output_pad = curses.newpad(1000, 1000)
+		curses.start_color()
+		curses.use_default_colors()
+		curses.init_pair(1, curses.COLOR_WHITE, -1)
+		self.color_normal = curses.color_pair(1)
+		curses.init_pair(2, curses.COLOR_RED, -1)
+		self.color_different = curses.color_pair(2)
+		curses.init_pair(3, curses.COLOR_YELLOW, -1)
+		self.color_linedifferent = curses.color_pair(3)
+		self.output_pad = curses.newpad(10000, 1000)
+		self.output_pad.keypad(True)
 		self.inscreen = True
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
 		curses.nocbreak()
-		self.stdscr.keypad(False)
+		self.output_pad.keypad(False)
 		curses.echo()
 		curses.endwin()
 		self.inscreen = False
 
+	def generateDiffColors(self, a, b):
+		seqm = difflib.SequenceMatcher(None, a, b)
+		for opcode, a0, a1, b0, b1 in seqm.get_opcodes():
+			if opcode == 'equal':
+				yield from [(part, self.color_normal) for part in seqm.a[a0:a1].splitlines(True)]
+			elif opcode == 'insert' or opcode == 'replace':
+				yield from [(part, self.color_different) for part in seqm.b[b0:b1].splitlines(True)]
+			elif opcode == 'delete':
+				yield ("", self.color_different)
+			else:
+				raise ValueError("Unknown opcode %s".format(opcode))
+
+	def groupLines(self, parts):
+		"""Groups parts=[(part, color)] into lists where the last part ends with a newline.
+		Also replaces color_normal colors with color_linedifferent if any part is not color_normal.
+		"""
+		line = []
+		hasDifference = False
+		replaceline = lambda line: list((p[0], self.color_linedifferent if hasDifference and p[1] == self.color_normal else p[1]) for p in line)
+		for part in parts:
+			if part[1] != self.color_normal:
+				hasDifference = True
+			if not len(part[0]): continue
+			line += [part]
+			if part[0][-1] == "\n":
+				yield replaceline(line)
+				line = []
+				hasDifference = False
+		yield replaceline(line)
+
 	def update(self):
-		if self.old_display_index != self.display_index:
-			self.old_display_index = self.display_index
-			if self.inscreen:
-				self.output_pad.clear()
-			else:
-				print("Clearing")
-			self.current_pad_lines = 0
-		for line in self.current_page()[self.current_pad_lines:]:
-			if self.inscreen:
-				self.output_pad.addstr(self.current_pad_lines, 0, line)
-			else:
-				print("Adding: " + line)
+		self.old_display_index = self.display_index
+		if self.inscreen:
+			self.output_pad.clear()
+		else:
+			print("Clearing")
+		self.current_pad_lines = 0
+
+		prev = "".join(self.current_page(1)[self.current_pad_lines:])
+		cur = "".join(self.current_page()[self.current_pad_lines:])
+
+		print(prev)
+		print(cur)
+
+		for line in self.groupLines(self.generateDiffColors(prev, cur)):
+			col = 0
+			for part, color in line:
+				if self.inscreen:
+					self.output_pad.addstr(self.current_pad_lines, col, part, color)
+					col += len(part)
+				else:
+					print("Adding: ", repr(part), color)
 			self.current_pad_lines += 1
 		if self.inscreen:
 			self.stdscr.move(0, 0)
+			self.stdscr.clrtoeol()
 			num_pages = len(self.history)
 			self.stdscr.addstr("page %i/%i" % (num_pages - self.display_index, num_pages))
 			self.output_pad.refresh(self.scroll, 0, 1, 0, self.height(), self.width())
@@ -80,11 +134,11 @@ class WatchCycles:
 
 	def keyboard_loop(self):
 		while self.running:
-			char = self.stdscr.getch()
+			char = self.output_pad.getch()
 			with self.lock:
 				if char == 113 or char == -1: self.running = False
 				elif char == curses.KEY_RIGHT: self.display_index = max(self.display_index - 1, 0)
-				elif char == curses.KEY_LEFT: self.display_index += 1
+				elif char == curses.KEY_LEFT: self.display_index = min(self.display_index + 1, len(self.history))
 				elif char == curses.KEY_UP: self.scroll = max(self.scroll - 1, 0)
 				elif char == curses.KEY_DOWN: self.scroll += 1
 				self.update()
