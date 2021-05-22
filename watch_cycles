@@ -36,8 +36,6 @@ class WatchCycles:
 		return ["No content"]
 
 	def run(self):
-		self.running = True
-		self.lock = threading.Lock()
 		self.thread_stdin = threading.Thread(name ='stdin', target=self.stdin_loop)
 		self.thread_stdin.start()
 		if self.inscreen:
@@ -59,6 +57,11 @@ class WatchCycles:
 		self.output_pad = curses.newpad(10000, 1000)
 		self.output_pad.keypad(True)
 		self.inscreen = True
+		self.running = True
+		self.lock = threading.Lock()
+		self.display_cv = threading.Condition(self.lock)
+		self.thread_display = threading.Thread(name ='display', target=self.display_loop)
+		self.thread_display.start()
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
@@ -68,6 +71,8 @@ class WatchCycles:
 		curses.endwin()
 		self.inscreen = False
 		self.running = False
+		with self.lock: self.display_cv.notify()
+		self.thread_display.join()
 
 	def generateDiffColors(self, a, b):
 		seqm = difflib.SequenceMatcher(None, a, b)
@@ -139,11 +144,18 @@ class WatchCycles:
 				elif char == curses.KEY_LEFT: self.display_index = min(self.display_index + 1, len(self.history))
 				elif char == curses.KEY_UP: self.scroll = max(self.scroll - 1, 0)
 				elif char == curses.KEY_DOWN: self.scroll += 1
-				if self.running:
-					self.update()
+				self.display_cv.notify()
 
 		# unblock the other thread
 		self.input_stream.close()
+	
+	def display_loop(self):
+		while self.running:
+			with self.lock:
+				self.display_cv.wait()
+				if not self.running:
+					break
+				self.update()
 
 	def stdin_loop(self):
 		for line in self.input_stream:
@@ -156,8 +168,7 @@ class WatchCycles:
 					self.old_display_index += 1
 			self.page += [line]
 			if self.display_index == 0:
-				with self.lock:
-					self.update()
+				with self.lock: self.display_cv.notify()
 
 mystdin_fd = os.dup(0)
 termin = open("/dev/tty")
