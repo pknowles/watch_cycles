@@ -38,13 +38,10 @@ class WatchCycles:
 	def run(self):
 		self.running = True
 		self.lock = threading.Lock()
-		if self.inscreen:
-			self.thread_keyboard = threading.Thread(name ='keyboard', target=self.keyboard_loop)
-			self.thread_keyboard.start()
 		self.thread_stdin = threading.Thread(name ='stdin', target=self.stdin_loop)
 		self.thread_stdin.start()
 		if self.inscreen:
-			self.thread_keyboard.join()
+			self.keyboard_loop()
 		self.thread_stdin.join()
 
 	def __enter__(self):
@@ -70,6 +67,7 @@ class WatchCycles:
 		curses.echo()
 		curses.endwin()
 		self.inscreen = False
+		self.running = False
 
 	def generateDiffColors(self, a, b):
 		seqm = difflib.SequenceMatcher(None, a, b)
@@ -141,7 +139,8 @@ class WatchCycles:
 				elif char == curses.KEY_LEFT: self.display_index = min(self.display_index + 1, len(self.history))
 				elif char == curses.KEY_UP: self.scroll = max(self.scroll - 1, 0)
 				elif char == curses.KEY_DOWN: self.scroll += 1
-				self.update()
+				if self.running:
+					self.update()
 
 		# unblock the other thread
 		self.input_stream.close()
@@ -159,12 +158,14 @@ class WatchCycles:
 			if self.display_index == 0:
 				with self.lock:
 					self.update()
-		#self.running = False
 
 mystdin_fd = os.dup(0)
 termin = open("/dev/tty")
 os.dup2(termin.fileno(), 0)
 mystdin = open(mystdin_fd, 'r')
 w = WatchCycles(mystdin, sys.argv[1])
-with w:
-	w.run()
+try:
+	with w:
+		w.run()
+except KeyboardInterrupt:
+	sys.exit(1)
